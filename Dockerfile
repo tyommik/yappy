@@ -15,6 +15,7 @@ COPY . /app/
 
 # Указываем, что контейнер слушает порт 8000
 EXPOSE 8000
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
 # Запускаем сервис при старте контейнера
 CMD ["python3", "service.py"]
