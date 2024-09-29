@@ -24,14 +24,12 @@ from src.database import VectorDB, VectorDBLite
 from src.hashers import *
 
 
-# db = VectorDB("http://localhost:19530", "dim64", 64)
 db = VectorDBLite("./vector.db", "dim640", 640, recreate_collection=False)
 # db.delete_collection()
 
 UPLOAD_DIR = "downloaded_videos"
 FRAME_DIR = "frames"
 EXTRACTION_FPS_RATE = 8 # число кадров в секунду, которые мы извлекаем
-#hasher = ClassicHash()
 hasher = MixHash()
 
 app = FastAPI(
@@ -39,12 +37,6 @@ app = FastAPI(
     version="1.0.0",
     description="API для проверки дубликатов видео"
 )
-
-# FIXMET удалить загрузку директории
-app.mount("/output", StaticFiles(directory="test_dataset"), name="data")
-# app.mount("/output", StaticFiles(directory="output"), name="data")
-templates = Jinja2Templates(directory="web")
-
 
 class VideoLinkRequest(BaseModel):
     link: HttpUrl
@@ -79,15 +71,6 @@ def download_video(url: str) -> pathlib.Path:
     return video_path
 
 
-# def remove_consecutive_duplicates(lst):
-#     if not lst:
-#         return []  # Возвращаем пустой список, если исходный список пустой
-#     result = [lst[0]]  # Добавляем первый элемент в результат
-#     for item in lst[1:]:
-#         if item != result[-1]:  # Добавляем элемент, если он не равен последнему в result
-#             result.append(item)
-#     return result
-
 
 def remove_consecutive_duplicates(lst):
     result = list(set(lst))
@@ -95,6 +78,19 @@ def remove_consecutive_duplicates(lst):
 
 
 class FrameSimilarity:
+    """
+    Класс для представления информации о схожести кадров.
+
+    Attributes:
+        frame_index (int): Индекс оригинального кадра.
+        similar_frames (List[Dict[str, Any]]): Список схожих кадров с их метаданными.
+
+    Этот класс используется для хранения информации о схожести между
+    оригинальным кадром и набором других кадров. Каждый схожий кадр
+    представлен словарем с метаданными, такими как идентификатор видео,
+    индекс кадра и мера схожести (дистанция).
+    """
+
     def __init__(self, frame_index: int, similar_frames: List[Dict[str, Any]]):
         self.frame_index = frame_index
         self.similar_frames = similar_frames
@@ -102,11 +98,34 @@ class FrameSimilarity:
 
 class VideoSimilarityAnalysis:
     def __init__(self):
+        """
+        Класс расчёта статистик.
+
+        Attributes:
+            frame_similarities (List[FrameSimilarity]): List of FrameSimilarity objects
+            video_similarities (Dict[str, List[Dict[str, Any]]]): Dictionary of video_id to list of similar frames
+        """
         self.frame_similarities: List[FrameSimilarity] = []
         self.video_similarities: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-
     def add_frame_similarity(self, frame_index: int,
                              similar_frames: List[Dict[str, Any]]):
+        """
+        Добавляет информацию о схожести кадров в анализ.
+
+        Args:
+            frame_index (int): Индекс оригинального кадра.
+            similar_frames (List[Dict[str, Any]]): Список схожих кадров с их метаданными.
+
+        Этот метод выполняет следующие действия:
+        1. Добавляет новый объект FrameSimilarity в список frame_similarities.
+        2. Обновляет словарь video_similarities, добавляя информацию о схожести
+           для каждого видео, к которому относятся схожие кадры.
+
+        Каждая запись в video_similarities содержит:
+        - 'original_frame': индекс оригинального кадра
+        - 'similar_frame': индекс схожего кадра
+        - 'distance': расстояние (мера схожести) между кадрами
+        """
         self.frame_similarities.append(FrameSimilarity(frame_index, similar_frames))
         for frame in similar_frames:
             self.video_similarities[frame['entity']['video_id']].append({
@@ -116,6 +135,25 @@ class VideoSimilarityAnalysis:
             })
 
     def analyze_similarities(self):
+        """
+        Анализирует схожести между кадрами видео и возвращает результаты анализа.
+
+        Returns:
+            Dict[str, Dict[str, Any]]: Словарь с результатами анализа для каждого видео.
+            Ключи - идентификаторы видео, значения - словари со следующими полями:
+            - 'total_similar_frames': общее количество схожих кадров
+            - 'average_distance': средняя дистанция (мера схожести) между кадрами
+            - 'frame_sequence': последовательность индексов схожих кадров без последовательных дубликатов
+            - 'is_sequential': булево значение, указывающее, является ли последовательность кадров преимущественно возрастающей
+            - 'sequence_correlation': корреляция последовательности кадров с идеальной возрастающей последовательностью
+
+        Метод выполняет следующие действия:
+        1. Для каждого видео сортирует схожие кадры по индексу оригинального кадра.
+        2. Удаляет последовательные дубликаты из последовательности индексов схожих кадров.
+        3. Вычисляет статистики на основе схожих кадров.
+        4. Определяет, является ли последовательность кадров преимущественно возрастающей.
+        5. Рассчитывает корреляцию последовательности кадров с идеальной возрастающей последовательностью.
+        """
         results = {}
         for video_id, similarities in self.video_similarities.items():
             similarities.sort(key=lambda x: int(x['original_frame']))
@@ -134,12 +172,42 @@ class VideoSimilarityAnalysis:
 
     @staticmethod
     def is_sequence_mostly_increasing(sequence):
+        """
+        Определяет, является ли последовательность преимущественно возрастающей.
+
+        Args:
+            sequence (List[int]): Последовательность чисел для анализа.
+
+        Returns:
+            bool: True, если более половины элементов последовательности возрастают,
+                  False в противном случае.
+
+        Метод подсчитывает количество случаев, когда текущий элемент больше предыдущего,
+        и сравнивает это количество с половиной длины последовательности.
+        """
         increases = sum(
             1 for i in range(1, len(sequence)) if sequence[i] > sequence[i - 1])
         return increases > len(sequence) / 2
 
     @staticmethod
     def calculate_sequence_correlation(sequence):
+        """
+        Вычисляет корреляцию между последовательностью и идеальной возрастающей последовательностью.
+
+        Args:
+            sequence (List[int]): Последовательность чисел для анализа.
+
+        Returns:
+            float: Значение корреляции от -1 до 1.
+                   1.0 означает идеальную положительную корреляцию,
+                   0.0 - отсутствие корреляции,
+                   -1.0 - идеальную отрицательную корреляцию.
+
+        Примечания:
+            - Если длина последовательности меньше 2, возвращается 1.0.
+            - Метод использует коэффициент корреляции Пирсона.
+            - Идеальная возрастающая последовательность генерируется как range(len(sequence)).
+        """
         if len(sequence) < 2:
             return 1.0
         increasing_list = list(range(len(sequence)))
@@ -195,15 +263,15 @@ def process_video(video_path: pathlib.Path, hash_method: ImageHasher, frame_inte
     frames_dir = video_dir / FRAME_DIR
     frames_dir.mkdir(exist_ok=True)
 
-    # # раскладываем видео на кадры
-    # (
-    #     ffmpeg
-    #     .input(str(video_path))
-    #     .filter('fps', fps=EXTRACTION_FPS_RATE)
-    #     .output(str(video_path.parent / 'frames' / '%d.jpg'), start_number=0)
-    #     .global_args('-loglevel', 'error')
-    #     .run()
-    # )
+    # раскладываем видео на кадры
+    (
+        ffmpeg
+        .input(str(video_path))
+        .filter('fps', fps=EXTRACTION_FPS_RATE)
+        .output(str(video_path.parent / 'frames' / '%d.jpg'), start_number=0)
+        .global_args('-loglevel', 'error')
+        .run()
+    )
 
     # Пример использования
     analysis = VideoSimilarityAnalysis()
@@ -266,10 +334,12 @@ def process_video(video_path: pathlib.Path, hash_method: ImageHasher, frame_inte
                     'img_hash': img_hash,
                     'video_id': video_id
                 })
-    # try:
-    #     shutil.rmtree(frames_dir)
-    # except Exception as e:
-    #     print(e)
+    
+    # удаляем временные файлы
+    try:
+        shutil.rmtree(frames_dir)
+    except Exception as e:
+        print(e)
     results = analysis.analyze_similarities()
 
     # Проверяем, не пустой ли результат
@@ -304,7 +374,7 @@ def process_video(video_path: pathlib.Path, hash_method: ImageHasher, frame_inte
             file_index = img_record['file_index']
             img_hash = img_record['img_hash']
             video_id = img_record['video_id']
-            res = db.add_frame_hash(img_hash, file_index, str(video_id))
+            db.add_frame_hash(img_hash, file_index, str(video_id))
     return index_array
 
 
@@ -342,16 +412,29 @@ def check_video_duplicate(video_request: VideoLinkRequest):
 @app.post("/add-video", response_model=VideoLinkResponse, tags=["API для добавления роликов видео"])
 def add_video_to_db(video_request: VideoLinkRequest):
     """
-    Добавление видео без проверок
+    Добавляет видео в базу данных без предварительной проверки на дубликаты.
+
+    Этот метод выполняет следующие действия:
+    1. Скачивает видео по предоставленной ссылке.
+    2. Если видео успешно скачано, извлекает из него кадры и добавляет их хеши в базу данных.
+    3. Возвращает результат операции в виде объекта VideoLinkResponse.
 
     Args:
-    - video_link (VideoLinkRequest): Объект с ссылкой на видео
+    - video_request (VideoLinkRequest): Объект, содержащий ссылку на видео для добавления.
 
     Returns:
-    - VideoLinkResponse: Результат проверки на дублирование
+    - VideoLinkResponse: Объект с результатом операции.
+      - is_duplicate (bool): Всегда True, если видео успешно добавлено.
+      - duplicate_for (List[str] или None): Список индексов добавленных кадров или None, если видео не было добавлено.
+
+    Raises:
+    - HTTPException: Возникает при ошибке сервера с кодом статуса 500.
+
+    Примечание:
+    - Метод не проверяет наличие дубликатов перед добавлением видео.
+    - Если видео не удалось скачать, возвращается VideoLinkResponse с is_duplicate=False.
     """
     try:
-
         # Скачиваем видео
         video_path = download_video(str(video_request.link))
 
@@ -362,19 +445,6 @@ def add_video_to_db(video_request: VideoLinkRequest):
         return VideoLinkResponse(is_duplicate=False)
     except Exception as e:
         raise HTTPException(status_code=500, detail="Ошибка сервера")
-
-
-
-# @app.get("/files", response_class=HTMLResponse)
-# async def list_files(request: Request):
-#
-#     files = pathlib.Path("./output").iterdir()
-#     files_paths = sorted([f"{request.url._url.replace('disk', 'svideo/disk')}/{f.name}" for f in files])
-#     print(files_paths)
-#     return templates.TemplateResponse(
-#         "list_files.html", {"request": request, "files": files_paths}
-#     )
-
 
 
 if __name__ == "__main__":
